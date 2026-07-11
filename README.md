@@ -1,2 +1,2 @@
-# kavastar-code
+# kawastar-code
 Open source AI Agent
