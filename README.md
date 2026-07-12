@@ -1,2 +1,2 @@
-# kawastar-code
+# Mauzi-code
 Open source AI Agent
