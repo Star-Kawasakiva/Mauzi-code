@@ -10,7 +10,7 @@ Win + R, cmd:
 ```text
 cd Mauzi-code-dev
 npm install
-npm run build:exe
+npm run dev
 ```
 
 # License
