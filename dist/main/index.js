@@ -4,6 +4,7 @@
 var import_electron = require("electron");
 var import_node_path5 = require("node:path");
 var import_node_fs = require("node:fs");
+var import_promises6 = require("node:fs/promises");
 var import_node_crypto = require("node:crypto");
 
 // src/tools/bash.ts
@@ -271,11 +272,11 @@ var PROVIDERS = [
     authPrefix: "",
     envKey: "GEMINI_API_KEY",
     models: [
-      "gemini-2.5-pro-exp-03-25",
       "gemini-2.0-flash",
       "gemini-2.0-flash-lite",
       "gemini-1.5-pro",
-      "gemini-1.5-flash"
+      "gemini-1.5-flash",
+      "gemini-1.5-flash-8b"
     ],
     supportsTools: false,
     supportsStreaming: true,
@@ -302,7 +303,7 @@ var PROVIDERS = [
     id: "deepseek",
     name: "DeepSeek",
     apiFormat: "openai",
-    defaultBase: "https://api.deepseek.com/v1",
+    defaultBase: "https://api.deepseek.com",
     authHeader: "Authorization",
     authPrefix: "Bearer ",
     envKey: "DEEPSEEK_API_KEY",
@@ -378,8 +379,9 @@ var PROVIDERS = [
     authPrefix: "Bearer ",
     envKey: "",
     models: [
-      "llama3.3",
       "llama3.2",
+      "llama3.3",
+      "llama3.1",
       "mistral",
       "codellama",
       "mixtral",
@@ -399,7 +401,22 @@ function getProvider(id) {
 function convertMessages(messages, format) {
   if (format === "anthropic") {
     return messages.map((m) => {
-      if (m.role === "user") return { role: "user", content: m.content };
+      if (m.role === "user") {
+        if (m.attachments && m.attachments.length > 0) {
+          const parts2 = [];
+          if (m.content) parts2.push({ type: "text", text: m.content });
+          for (const a of m.attachments) {
+            if (a.type === "image") {
+              parts2.push({ type: "image", source: { type: "base64", media_type: a.mimeType, data: a.data } });
+            } else {
+              parts2.push({ type: "text", text: `[File: ${a.name}]
+${a.data}` });
+            }
+          }
+          return { role: "user", content: parts2 };
+        }
+        return { role: "user", content: m.content };
+      }
       if (m.role === "tool") {
         const tr = m.toolResults?.[0];
         return {
@@ -436,6 +453,19 @@ function convertMessages(messages, format) {
         }));
       }
       return msg;
+    }
+    if (m.role === "user" && m.attachments && m.attachments.length > 0) {
+      const parts = [];
+      if (m.content) parts.push({ type: "text", text: m.content });
+      for (const a of m.attachments) {
+        if (a.type === "image") {
+          parts.push({ type: "image_url", image_url: { url: `data:${a.mimeType};base64,${a.data}` } });
+        } else {
+          parts.push({ type: "text", text: `[File: ${a.name}]
+${a.data}` });
+        }
+      }
+      return { role: "user", content: parts };
     }
     return { role: "user", content: m.content };
   });
@@ -497,7 +527,9 @@ async function* streamAnthropic(body, settings, signal) {
 async function* streamOpenAI(body, settings, signal) {
   const url = `${settings.apiBase}/chat/completions`;
   const headers = {
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://mauzicode.app",
+    "X-Title": "MauziCode"
   };
   headers[settings.provider.authHeader] = settings.provider.authPrefix + settings.apiKey;
   const response = await fetch(url, {
@@ -670,7 +702,7 @@ async function* streamComplete(messages, tools2, settings, signal) {
     if (provider.supportsTools && tools2.length > 0) {
       body.tools = getToolSchemas(tools2, "openai");
     }
-    yield* streamOpenAI(body, settings, signal);
+    yield* streamOpenAI(body, { ...settings, provider }, signal);
   }
 }
 
@@ -718,11 +750,18 @@ function createSession(title, cwd2, model) {
     model
   };
 }
+async function deleteSession(cwd2, id) {
+  try {
+    await (0, import_promises5.unlink)(sessionPath(cwd2, id));
+  } catch {
+  }
+}
 
 // src/main/index.ts
 var mainWindow = null;
 var session;
 var cwd = process.cwd();
+var projectDir = process.cwd();
 var abortController = null;
 var SETTINGS_PATH = (0, import_node_path5.join)(import_electron.app.getPath("userData"), "settings.json");
 function loadSettings() {
@@ -734,7 +773,9 @@ function loadSettings() {
         apiKey: data.apiKey || process.env["ANTHROPIC_API_KEY"] || "",
         model: data.model || "claude-sonnet-4-20250514",
         apiBase: data.apiBase || "https://api.anthropic.com",
-        maxTokens: data.maxTokens || 8192
+        maxTokens: Number(data.maxTokens) || 8192,
+        themePrimary: data.themePrimary || "#6EB5FF",
+        themeSecondary: data.themeSecondary || "#B0E0E6"
       };
     }
   } catch {
@@ -745,7 +786,9 @@ function loadSettings() {
     apiKey: envKey || "",
     model: "claude-sonnet-4-20250514",
     apiBase: "https://api.anthropic.com",
-    maxTokens: 8192
+    maxTokens: 8192,
+    themePrimary: "#6EB5FF",
+    themeSecondary: "#B0E0E6"
   };
 }
 function createWindow() {
@@ -773,8 +816,68 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+  const menu = import_electron.Menu.buildFromTemplate([
+    {
+      label: "File",
+      submenu: [
+        {
+          label: "Open Project...",
+          accelerator: "CmdOrCtrl+O",
+          click: async () => {
+            if (!mainWindow) return;
+            const result = await import_electron.dialog.showOpenDialog(mainWindow, {
+              properties: ["openDirectory"],
+              title: "Open Project Folder"
+            });
+            if (!result.canceled && result.filePaths[0]) {
+              projectDir = result.filePaths[0];
+              mainWindow.webContents.send("project:changed", projectDir);
+            }
+          }
+        },
+        { type: "separator" },
+        { role: "quit" }
+      ]
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" }
+      ]
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" }
+      ]
+    }
+  ]);
+  import_electron.Menu.setApplicationMenu(menu);
 }
-async function handleApiStream(messages, settings, win) {
+var MODE_PROMPTS = {};
+function loadModePrompt(mode) {
+  if (MODE_PROMPTS[mode]) return MODE_PROMPTS[mode];
+  try {
+    const raw = (0, import_node_fs.readFileSync)((0, import_node_path5.join)(__dirname, "../../prompts", `${mode}.md`), "utf-8");
+    MODE_PROMPTS[mode] = raw;
+    return raw;
+  } catch {
+    return "You are MauziCode, a desktop AI coding assistant. Be concise and helpful.";
+  }
+}
+async function handleApiStream(messages, settings, win, mode) {
   abortController = new AbortController();
   let toolUseDepth = 0;
   const maxDepth = 10;
@@ -792,10 +895,7 @@ async function handleApiStream(messages, settings, win) {
       apiBase: settings.apiBase,
       model: settings.model,
       maxTokens: settings.maxTokens,
-      systemPrompt: `You are MauziCode, a desktop AI coding assistant.
-You have tools available: bash, file_read, file_write, file_edit, glob, grep.
-Use them when the user asks you to interact with files or run commands.
-Be concise and helpful.`
+      systemPrompt: loadModePrompt(mode)
     }, abortController.signal);
     try {
       for await (const chunk of stream) {
@@ -854,7 +954,7 @@ Be concise and helpful.`
         continue;
       }
       win.webContents.send("stream:status", `running ${tc.name}`);
-      const context = { cwd, abortSignal: abortController.signal };
+      const context = { cwd: projectDir, abortSignal: abortController.signal };
       try {
         const output = await tool.execute(tc.args, context);
         messages.push({
@@ -909,11 +1009,36 @@ import_electron.ipcMain.handle("session:save", async () => {
   return true;
 });
 import_electron.ipcMain.handle("sessions:list", async () => listSessions(cwd));
-import_electron.ipcMain.handle("cwd:get", () => cwd);
-import_electron.ipcMain.handle("send:message", async (_, text) => {
+import_electron.ipcMain.handle("session:load", async (_, sessionId) => {
+  const sessions = await listSessions(cwd);
+  const found = sessions.find((s) => s.id === sessionId);
+  if (found) {
+    session = found;
+    return found;
+  }
+  return null;
+});
+import_electron.ipcMain.handle("session:updateTitle", async (_, sessionId, title) => {
+  const sessions = await listSessions(cwd);
+  const found = sessions.find((s) => s.id === sessionId);
+  if (found) {
+    found.title = title;
+    found.updatedAt = Date.now();
+    await saveSession(cwd, found);
+  }
+});
+import_electron.ipcMain.handle("session:delete", async (_, sessionId) => {
+  await deleteSession(cwd, sessionId);
+  if (session?.id === sessionId) {
+    session = createSession("New chat", cwd, session.model);
+  }
+  return true;
+});
+import_electron.ipcMain.handle("cwd:get", () => projectDir);
+import_electron.ipcMain.handle("send:message", async (_, text, mode, attachments) => {
   if (!mainWindow) return;
   const settings = loadSettings();
-  if (!settings.apiKey) {
+  if (!settings.apiKey && settings.provider !== "ollama" && settings.provider !== "lmstudio") {
     mainWindow.webContents.send("stream:error", "No API key configured. Open Settings to set one.");
     return;
   }
@@ -921,11 +1046,12 @@ import_electron.ipcMain.handle("send:message", async (_, text) => {
     id: (0, import_node_crypto.randomUUID)(),
     role: "user",
     content: text,
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    attachments
   };
   session.messages.push(userMsg);
   const msgCopy = [...session.messages];
-  await handleApiStream(msgCopy, settings, mainWindow);
+  await handleApiStream(msgCopy, settings, mainWindow, mode);
   session.messages = msgCopy;
   await saveSession(cwd, session).catch(() => {
   });
@@ -937,6 +1063,21 @@ import_electron.ipcMain.handle("abort", () => {
 });
 import_electron.ipcMain.handle("tools:list", () => {
   return getAllTools().map((t) => ({ name: t.name, description: t.description }));
+});
+import_electron.ipcMain.handle("file:read-attachment", async (_, filePath) => {
+  try {
+    const buffer = await (0, import_promises6.readFile)(filePath);
+    const ext = filePath.split(".").pop()?.toLowerCase() || "";
+    const imageExts = ["jpg", "jpeg", "png", "gif", "webp"];
+    if (imageExts.includes(ext)) {
+      const mime = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+      return { type: "image", mimeType: mime, data: buffer.toString("base64"), name: filePath.split(/[/\\]/).pop() || "" };
+    }
+    const text = buffer.toString("utf-8");
+    return { type: "text", mimeType: "text/plain", data: text, name: filePath.split(/[/\\]/).pop() || "" };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
 });
 import_electron.app.whenReady().then(() => {
   const settings = loadSettings();
